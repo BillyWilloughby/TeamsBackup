@@ -1,36 +1,73 @@
+# Load Graph Module and authenticate
+#Import-Module Microsoft.Graph -MinimumVersion 2.0.0 
 
-# Authenticate user
-Write-Host "Authenticating with Microsoft Graph..."
-Connect-MgGraph -Scopes "Chat.Read"
-
-# Create base folders
+$LogPath = ".\DownloadTeams.log"
 $exportFolder = ".\ChatHTML"
 $attachmentsRoot = ".\Attachments"
-Write-Host "Creating export directories..."
+$retryDelaySec = 10
+$throttleDelayMs = 500
+
+function Log {
+    param([string]$msg)
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    "$timestamp - $msg" | Tee-Object -FilePath $LogPath -Append
+}
+
+Log "Authenticating with Microsoft Graph..."
+Connect-MgGraph -Scopes "Chat.Read"
+
+# Ensure folders
 New-Item -ItemType Directory -Path $exportFolder -Force | Out-Null
 New-Item -ItemType Directory -Path $attachmentsRoot -Force | Out-Null
 
-# Get all chats
 try {
-    Write-Host "Fetching all chats..."
+    Log "Fetching all chats..."
     $chats = Get-MgChat -All -ErrorAction Stop
-    Write-Host "Found $($chats.Count) chat(s)."
+    Log "Found $($chats.Count) chats."
 } catch {
-    Write-Host "ERROR: Unable to retrieve chats. $_"
+    Log "ERROR retrieving chats: $_"
     return
 }
 
-Write-Host "Found $($chats.Count) chat(s)."
-
 foreach ($chat in $chats) {
-    Write-Host "Processing chat: $($chat.Id)"
-    $messages = Get-MgChatMessage -ChatId $chat.Id -All
-    Write-Host "  Retrieved $($messages.Count) message(s)."
+    $chatId = $chat.Id
+    $participants = ($chat.Members | ForEach-Object {
+        $_.DisplayName
+    }) -join ", "
 
-    $safeChatId = $chat.Id -replace '[^a-zA-Z0-9]', '_'
-    $chatFile = Join-Path $exportFolder "Chat_$safeChatId.html"
-    $chatFolder = Join-Path $attachmentsRoot $safeChatId
+    $baseName = if ($chat.Topic) {
+        $chat.Topic
+    } elseif ($participants) {
+        $participants -replace '[^a-zA-Z0-9 _-]', '_'
+    } else {
+        "Chat_" + (Get-Date).ToString("yyyy-MM-dd")
+    }
+
+    $safeName = $baseName -replace '[^a-zA-Z0-9 _-]', '_'
+    $chatFile = Join-Path $exportFolder "$safeName.html"
+    $chatFolder = Join-Path $attachmentsRoot $safeName
     New-Item -ItemType Directory -Path $chatFolder -Force | Out-Null
+
+    $messages = $null
+    $retry = $true
+    while ($retry) {
+        try {
+            $messages = Get-MgChatMessage -ChatId $chatId -All -ErrorAction Stop
+            $retry = $false
+        } catch {
+            if ($_.Exception.Response.StatusCode -eq 403) {
+                Log "403 received. Retrying after $retryDelaySec seconds for chat $chatId..."
+                Start-Sleep -Seconds $retryDelaySec
+            } else {
+                Log "Error retrieving messages for chat $chatId0 : $_"
+                break
+            }
+        }
+    }
+
+    if (-not $messages) { continue }
+
+    Log "Processing $($messages.Count) messages for chat $chatId"
 
     $html = @"
 <!DOCTYPE html>
@@ -57,24 +94,23 @@ foreach ($chat in $chats) {
         $body = $msg.Body.Content
         $attachmentsHtml = ""
 
-        Write-Host "    Message from $chatSender at $time"
+        Log "Message from $chatSender at $time"
+        Start-Sleep -Milliseconds $throttleDelayMs
 
         if ($msg.Attachments.Count -gt 0) {
-            Write-Host "      Found $($msg.Attachments.Count) attachment(s)."
             foreach ($att in $msg.Attachments) {
-                if ($att.ContentUrl -ne $null) {
+                if ($att.ContentUrl) {
                     $fileName = "$($msg.Id)_$($att.Name)" -replace '[^a-zA-Z0-9._-]', '_'
                     $filePath = Join-Path $chatFolder $fileName
                     try {
-                        Write-Host "        Downloading: $($att.Name)"
                         Invoke-WebRequest -Uri $att.ContentUrl `
-                                          -Headers @{ Authorization = "Bearer $((Get-MgContext).AccessToken)" } `
-                                          -OutFile $filePath -ErrorAction Stop
-                        $relativePath = "..\Attachments\$safeChatId\$fileName"
+                            -Headers @{ Authorization = "Bearer $((Get-MgContext).AccessToken)" } `
+                            -OutFile $filePath -ErrorAction Stop
+                        $relativePath = "..\Attachments\$safeName\$fileName"
                         $attachmentsHtml += "<div class='attachment'>Attachment: <a href='$relativePath'>$fileName</a></div>"
                     } catch {
-                        Write-Host "        Failed to download: $($att.Name)"
-                        $attachmentsHtml += "<div class='attachment'>Failed to download attachment: $($att.Name)</div>"
+                        Log "Failed to download attachment $($att.Name): $_"
+                        $attachmentsHtml += "<div class='attachment'>Failed: $($att.Name)</div>"
                     }
                 }
             }
@@ -91,10 +127,8 @@ foreach ($chat in $chats) {
     }
 
     $html += "</body></html>"
-
-    # Save HTML file
     Set-Content -Path $chatFile -Value $html -Encoding UTF8
-    Write-Host "  Exported to: $chatFile"
+    Log "Exported chat to: $chatFile"
 }
 
-Write-Host "Export completed."
+Log "Export completed."

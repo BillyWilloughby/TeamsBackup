@@ -1,20 +1,31 @@
-# Load Microsoft Graph module
-Import-Module Microsoft.Graph -MinimumVersion 2.0.0 -Force
 
 # Authenticate user
+Write-Host "Authenticating with Microsoft Graph..."
 Connect-MgGraph -Scopes "Chat.Read"
 
 # Create base folders
 $exportFolder = ".\ChatHTML"
 $attachmentsRoot = ".\Attachments"
+Write-Host "Creating export directories..."
 New-Item -ItemType Directory -Path $exportFolder -Force | Out-Null
 New-Item -ItemType Directory -Path $attachmentsRoot -Force | Out-Null
 
 # Get all chats
-$chats = Get-MgChat -All
+try {
+    Write-Host "Fetching all chats..."
+    $chats = Get-MgChat -All -ErrorAction Stop
+    Write-Host "Found $($chats.Count) chat(s)."
+} catch {
+    Write-Host "ERROR: Unable to retrieve chats. $_"
+    return
+}
+
+Write-Host "Found $($chats.Count) chat(s)."
 
 foreach ($chat in $chats) {
+    Write-Host "Processing chat: $($chat.Id)"
     $messages = Get-MgChatMessage -ChatId $chat.Id -All
+    Write-Host "  Retrieved $($messages.Count) message(s)."
 
     $safeChatId = $chat.Id -replace '[^a-zA-Z0-9]', '_'
     $chatFile = Join-Path $exportFolder "Chat_$safeChatId.html"
@@ -46,18 +57,23 @@ foreach ($chat in $chats) {
         $body = $msg.Body.Content
         $attachmentsHtml = ""
 
+        Write-Host "    Message from $chatSender at $time"
+
         if ($msg.Attachments.Count -gt 0) {
+            Write-Host "      Found $($msg.Attachments.Count) attachment(s)."
             foreach ($att in $msg.Attachments) {
                 if ($att.ContentUrl -ne $null) {
                     $fileName = "$($msg.Id)_$($att.Name)" -replace '[^a-zA-Z0-9._-]', '_'
                     $filePath = Join-Path $chatFolder $fileName
                     try {
+                        Write-Host "        Downloading: $($att.Name)"
                         Invoke-WebRequest -Uri $att.ContentUrl `
                                           -Headers @{ Authorization = "Bearer $((Get-MgContext).AccessToken)" } `
                                           -OutFile $filePath -ErrorAction Stop
                         $relativePath = "..\Attachments\$safeChatId\$fileName"
                         $attachmentsHtml += "<div class='attachment'>Attachment: <a href='$relativePath'>$fileName</a></div>"
                     } catch {
+                        Write-Host "        Failed to download: $($att.Name)"
                         $attachmentsHtml += "<div class='attachment'>Failed to download attachment: $($att.Name)</div>"
                     }
                 }
@@ -78,5 +94,7 @@ foreach ($chat in $chats) {
 
     # Save HTML file
     Set-Content -Path $chatFile -Value $html -Encoding UTF8
-    Write-Host "Exported: $chatFile"
+    Write-Host "  Exported to: $chatFile"
 }
+
+Write-Host "Export completed."

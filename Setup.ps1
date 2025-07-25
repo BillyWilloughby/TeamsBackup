@@ -1,8 +1,11 @@
-# Install full Graph module with all features (v2+ required)
+# Install unified Graph SDK (v2+)
 Install-Module Microsoft.Graph -Scope CurrentUser -Force
 
-# Ensure Chat-specific module is available
-Import-Module Microsoft.Graph.Chat -Force
+# Import the core module (includes all cmdlets)
+Import-Module Microsoft.Graph -Force
 
-# Authenticate with correct scopes
+# Set to beta or v1.0 profile (beta includes more Teams chat features)
+Select-MgProfile -Name "beta"
+
+# Connect with delegated user auth
 Connect-MgGraph -Scopes "Chat.Read"

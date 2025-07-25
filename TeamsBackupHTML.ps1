@@ -24,7 +24,8 @@ try {
     Log "Fetching all chats..."
     $chats = Get-MgChat -All -ErrorAction Stop
     Log "Found $($chats.Count) chats."
-} catch {
+}
+catch {
     Log "ERROR retrieving chats: $_"
     return
 }
@@ -32,14 +33,16 @@ try {
 foreach ($chat in $chats) {
     $chatId = $chat.Id
     $participants = ($chat.Members | ForEach-Object {
-        $_.DisplayName
-    }) -join ", "
+            $_.DisplayName
+        }) -join ", "
 
     $baseName = if ($chat.Topic) {
         $chat.Topic
-    } elseif ($participants) {
+    }
+    elseif ($participants) {
         $participants -replace '[^a-zA-Z0-9 _-]', '_'
-    } else {
+    }
+    else {
         "Chat_" + (Get-Date).ToString("yyyy-MM-dd")
     }
 
@@ -54,11 +57,13 @@ foreach ($chat in $chats) {
         try {
             $messages = Get-MgChatMessage -ChatId $chatId -All -ErrorAction Stop
             $retry = $false
-        } catch {
+        }
+        catch {
             if ($_.Exception.Response.StatusCode -eq 403) {
                 Log "403 received. Retrying after $retryDelaySec seconds for chat $chatId..."
                 Start-Sleep -Seconds $retryDelaySec
-            } else {
+            }
+            else {
                 Log "Error retrieving messages for chat $chatId0 : $_"
                 break
             }
@@ -89,30 +94,62 @@ foreach ($chat in $chats) {
 "@
 
     foreach ($msg in $messages) {
-        $chatSender = $msg.From?.User?.DisplayName ?? "Unknown"
-        $time = $msg.CreatedDateTime
-        $body = $msg.Body.Content
-        $attachmentsHtml = ""
+        $chatSender = "Unknown"
+        if ($msg.From -and $msg.From.User) {
+            $chatSender = $msg.From.User.DisplayName
+        }
+        elseif ($msg.From -and $msg.From.Application) {
+            $chatSender = "System: $($msg.From.Application.DisplayName)"
+        }
 
+        $time = $msg.CreatedDateTime
+        $body = $null
+
+        if ($msg.MessageType -eq "systemEventMessage" -and $msg.EventDetail) {
+            $eventType = $msg.EventDetail.'@odata.type'
+            $eventJson = $msg.EventDetail | ConvertTo-Json -Depth 5 -Compress
+            $body = "<pre>SYSTEM EVENT: $eventType`n$eventJson</pre>"
+        }
+        elseif ($msg.Body -and $msg.Body.Content -ne "") {
+            $body = $msg.Body.Content
+        }
+
+        # Skip blank or deleted messages
+        if (-not $body -or $body.Trim() -eq "") {
+            Log "Skipped empty message $($msg.Id) at $time"
+            continue
+        }
+
+        $attachmentsHtml = ""
         Log "Message from $chatSender at $time"
         Start-Sleep -Milliseconds $throttleDelayMs
 
+
         if ($msg.Attachments.Count -gt 0) {
             foreach ($att in $msg.Attachments) {
-                if ($att.ContentUrl) {
+                if ($att.Id -and $att.Name) {
                     $fileName = "$($msg.Id)_$($att.Name)" -replace '[^a-zA-Z0-9._-]', '_'
                     $filePath = Join-Path $chatFolder $fileName
                     try {
-                        Invoke-WebRequest -Uri $att.ContentUrl `
-                            -Headers @{ Authorization = "Bearer $((Get-MgContext).AccessToken)" } `
-                            -OutFile $filePath -ErrorAction Stop
-                        $relativePath = "..\Attachments\$safeName\$fileName"
+                        Write-Host "        Downloading: $($att.Name)"
+                        $attachment = Get-MgChatMessageAttachment `
+                            -ChatId $chat.Id `
+                            -ChatMessageId $msg.Id `
+                            -AttachmentId $att.Id `
+                            -ErrorAction Stop
+                
+                        $bytes = [System.Convert]::FromBase64String($attachment.ContentBytes)
+                        [System.IO.File]::WriteAllBytes($filePath, $bytes)
+                
+                        $relativePath = "..\Attachments\$safeChatId\$fileName"
                         $attachmentsHtml += "<div class='attachment'>Attachment: <a href='$relativePath'>$fileName</a></div>"
-                    } catch {
-                        Log "Failed to download attachment $($att.Name): $_"
-                        $attachmentsHtml += "<div class='attachment'>Failed: $($att.Name)</div>"
+                    }
+                    catch {
+                        Write-Host "        Failed to download: $($att.Name)"
+                        $attachmentsHtml += "<div class='attachment'>Failed to download attachment: $($att.Name)</div>"
                     }
                 }
+                
             }
         }
 

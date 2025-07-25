@@ -42,6 +42,7 @@ catch {
 # Get current user's ID using /me endpoint directly
 try {
     $me = (Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/me").Id
+    $meName = (Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/me").DisplayName
 } catch {
     Log "Failed to resolve current user identity: $_" -Error
     return
@@ -51,6 +52,9 @@ try {
 if (-not $me) {
     Log "Current user ID is null or empty. Cannot proceed." -Error
     return
+} else {
+    Log "Current user ID: $me"
+    Log "$meName"
 }
 Read-Host -Prompt "Press Enter to continue..."
 

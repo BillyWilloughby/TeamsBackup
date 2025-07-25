@@ -1,20 +1,36 @@
-# Load Graph Module and authenticate
-#Import-Module Microsoft.Graph -MinimumVersion 2.0.0 
+##########################################################################
+# Backup Teams messages from your teams
+# to HTML files with attachments
+# Requires Microsoft Graph PowerShell SDK
+# https://learn.microsoft.com/en-us/powershell/microsoftgraph/installation?view=graph-powershell-1.0
+##########################################################################
 
-$LogPath = ".\DownloadTeams.log"
+
+# Timestamped log path
+$logTimestamp = (Get-Date).ToString("yyyy-MM-dd HH.mm.ss")
+$LogPath = ".\DownloadTeams_$logTimestamp.log"
+
 $exportFolder = ".\ChatHTML"
 $attachmentsRoot = ".\Attachments"
 $retryDelaySec = 10
-$throttleDelayMs = 500
+$throttleDelayMs = 75
 
 function Log {
-    param([string]$msg)
+    param([string]$msg, [switch]$ErrorMsg)
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    "$timestamp - $msg" | Tee-Object -FilePath $LogPath -Append
+    $line = "$timestamp - $msg"
+    if ($ErrorMsg) {
+        Write-Host $line -ForegroundColor Red
+    }
+    else {
+        Write-Host $line
+    }
+    $line | Tee-Object -FilePath $LogPath -Append | Out-Null
 }
 
+
 Log "Authenticating with Microsoft Graph..."
-Connect-MgGraph -Scopes "Chat.Read"
+Connect-MgGraph -Scopes "Chat.Read", "ChatMessage.Read", "Files.Read"
 
 # Ensure folders
 New-Item -ItemType Directory -Path $exportFolder -Force | Out-Null
@@ -26,7 +42,7 @@ try {
     Log "Found $($chats.Count) chats."
 }
 catch {
-    Log "ERROR retrieving chats: $_"
+    Log "ERROR retrieving chats: $_" -Error
     return
 }
 
@@ -47,9 +63,18 @@ foreach ($chat in $chats) {
     }
 
     $safeName = $baseName -replace '[^a-zA-Z0-9 _-]', '_'
-    $chatFile = Join-Path $exportFolder "$safeName.html"
+    $timestampSuffix = (Get-Date).ToString("yyyy-MM-dd.HH-mm")
+ 
+    $baseFileName = "$safeName`_$timestampSuffix"
+    $chatFile = Join-Path $exportFolder "$baseFileName.html"
+    $index = 1
+    while (Test-Path $chatFile) {
+        $chatFile = Join-Path $exportFolder "$baseFileName`_$index.html"
+        $index++
+    }
+
     $chatFolder = Join-Path $attachmentsRoot $safeName
-    New-Item -ItemType Directory -Path $chatFolder -Force | Out-Null
+    $attachmentsDownloaded = $false
 
     $messages = $null
     $retry = $true
@@ -64,7 +89,7 @@ foreach ($chat in $chats) {
                 Start-Sleep -Seconds $retryDelaySec
             }
             else {
-                Log "Error retrieving messages for chat $chatId0 : $_"
+                Log "Error retrieving messages for chat $chatId : $_" -Error
                 break
             }
         }
@@ -124,48 +149,57 @@ foreach ($chat in $chats) {
         Log "Message from $chatSender at $time"
         Start-Sleep -Milliseconds $throttleDelayMs
 
-
         if ($msg.Attachments.Count -gt 0) {
             foreach ($att in $msg.Attachments) {
-                if ($att.Id -and $att.Name) {
+                if ($att.Name -and $att.ContentBytes) {
                     $fileName = "$($msg.Id)_$($att.Name)" -replace '[^a-zA-Z0-9._-]', '_'
                     $filePath = Join-Path $chatFolder $fileName
                     try {
                         Write-Host "        Downloading: $($att.Name)"
-                        $attachment = Get-MgChatMessageAttachment `
-                            -ChatId $chat.Id `
-                            -ChatMessageId $msg.Id `
-                            -AttachmentId $att.Id `
-                            -ErrorAction Stop
-                
-                        $bytes = [System.Convert]::FromBase64String($attachment.ContentBytes)
+        
+                        $bytes = [System.Convert]::FromBase64String($att.ContentBytes)
+                        if (-not (Test-Path $chatFolder)) {
+                            New-Item -ItemType Directory -Path $chatFolder -Force | Out-Null
+                        }
+        
                         [System.IO.File]::WriteAllBytes($filePath, $bytes)
-                
-                        $relativePath = "..\Attachments\$safeChatId\$fileName"
+        
+                        $relativePath = "..\Attachments\$safeName\$fileName"
                         $attachmentsHtml += "<div class='attachment'>Attachment: <a href='$relativePath'>$fileName</a></div>"
+                        $attachmentsDownloaded = $true
                     }
                     catch {
-                        Write-Host "        Failed to download: $($att.Name)"
+                        Log "        Failed to write: $($att.Name) - $_" -Error
                         $attachmentsHtml += "<div class='attachment'>Failed to download attachment: $($att.Name)</div>"
                     }
+                }
+                else {
+                    $type = $att.'@odata.type'
+                    Log "        Attachment $($att.Name) has no base64 content. Type: $type" -Error
+                    $attachmentsHtml += "<div class='attachment'>Not downloadable (cloud/reference): $($att.Name)</div>"
                 }
                 
             }
         }
+        
 
         $html += @"
-<div class='msg'>
+    <div class='msg'>
     <div class='sender'>$chatSender</div>
     <div class='timestamp'>$time</div>
     <div class='content'>$body</div>
     $attachmentsHtml
-</div>
+    </div>
 "@
     }
 
     $html += "</body></html>"
     Set-Content -Path $chatFile -Value $html -Encoding UTF8
     Log "Exported chat to: $chatFile"
+
+    if (-not $attachmentsDownloaded -and (Test-Path $chatFolder)) {
+        Remove-Item -Recurse -Force -Path $chatFolder
+    }
 }
 
 Log "Export completed."

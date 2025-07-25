@@ -8,4 +8,5 @@ Import-Module Microsoft.Graph -Force
 Select-MgProfile -Name "beta"
 
 # Connect with delegated user auth
-Connect-MgGraph -Scopes "Chat.Read"
+#Connect-MgGraph -Scopes "Chat.Read", "ChatMessage.Read", "Files.Read"
+

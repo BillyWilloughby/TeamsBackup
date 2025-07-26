@@ -2,6 +2,8 @@
 # Backup Teams messages from your teams
 # to HTML files with attachments and inline images
 # Requires Microsoft Graph PowerShell SDK
+#
+# Billy Willoughby 2025/07/25
 ##########################################################################
 
 
@@ -10,7 +12,7 @@ $logTimestamp = (Get-Date).ToString("yyyy-MM-dd HH.mm.ss")
 $LogPath = ".\DownloadTeams_$logTimestamp.log"
 
 $exportFolder = ".\TeamsChatHTML"
-$attachmentsRoot = ".\TeamsAttachments"
+$attachmentsFolder = ".\TeamsAttachments"
 $retryDelaySec = 10
 $throttleDelayMs = 75
 
@@ -24,10 +26,62 @@ function Log {
 }
 
 Log "Authenticating with Microsoft Graph..."
-Connect-MgGraph -Scopes "User.Read", "Chat.Read", "ChatMessage.Read", "Files.Read"
-
+#Connect-MgGraph -Scopes "User.Read", "Chat.Read", "ChatMessage.Read", "Files.Read"
+Connect-MgGraph -Scopes "User.Read", "Chat.Read", "Chat.ReadWrite", "Files.Read"
+if (-not (Get-MgContext)) {
+    Log "Failed to authenticate with Microsoft Graph. Please check your credentials and permissions." -Error
+    return
+}
 New-Item -ItemType Directory -Path $exportFolder -Force | Out-Null
-New-Item -ItemType Directory -Path $attachmentsRoot -Force | Out-Null
+New-Item -ItemType Directory -Path $attachmentsFolder -Force | Out-Null
+
+
+
+# Get current user's ID using /me endpoint directly
+try {
+    $me = (Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/me").Id
+    $meName = (Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/me").DisplayName
+}
+catch {
+    Log "Failed to resolve current user identity: $_" -Error
+    return
+}
+
+# Ensure we have a valid user ID
+if (-not $me) {
+    Log "Current user ID is null or empty. Cannot proceed." -Error
+    return
+}
+else {
+    Log ""
+    Log "Current user ID: $me"
+    Log "$meName"
+    Log "Exporting chats to HTML files in $exportFolder"
+    Log "Attachments will be saved in $attachmentsFolder"
+    Log ""
+}
+$ctx = Get-MgContext
+Write-Host "Authenticated with Microsoft Graph:"
+
+Write-Host "    Account              :" -ForegroundColor Green -NoNewline
+Write-Host " $($ctx.Account)"
+Write-Host "    ClientId             :" -ForegroundColor Green -NoNewline
+Write-Host " $($ctx.ClientId)"
+Write-Host "    TenantId             :" -ForegroundColor Green -NoNewline
+Write-Host " $($ctx.TenantId)"
+Write-Host "    AppName              :" -ForegroundColor Green -NoNewline
+Write-Host " $($ctx.AppName)"
+Write-Host "    AuthType             :" -ForegroundColor Green -NoNewline
+Write-Host " $($ctx.AuthType)"
+Write-Host "    Scopes               :" -ForegroundColor Green -NoNewline
+Write-Host " $($ctx.Scopes -join ', ')"
+Write-Host "    Environment          :" -ForegroundColor Green -NoNewline
+Write-Host " $($ctx.Environment)"
+Write-Host "    TokenCredentialType  :" -ForegroundColor Green -NoNewline
+Write-Host " $($ctx.TokenCredentialType)"
+
+Read-Host -Prompt "Press Enter to continue..."
+
 
 try {
     Log "Fetching all chats..."
@@ -39,33 +93,17 @@ catch {
     return
 }
 
-# Get current user's ID using /me endpoint directly
-try {
-    $me = (Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/me").Id
-    $meName = (Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/me").DisplayName
-} catch {
-    Log "Failed to resolve current user identity: $_" -Error
-    return
-}
-
-# Ensure we have a valid user ID
-if (-not $me) {
-    Log "Current user ID is null or empty. Cannot proceed." -Error
-    return
-} else {
-    Log "Current user ID: $me"
-    Log "$meName"
-}
-Read-Host -Prompt "Press Enter to continue..."
 
 foreach ($chat in $chats) {
     $chatId = $chat.Id
     $participants = ($chat.Members | ForEach-Object { $_.DisplayName }) -join ", "
     $baseName = if ($chat.ChatType -eq "oneOnOne" -and -not $chat.Topic) {
         ($chat.Members | Where-Object { $_.UserId -ne $me }).DisplayName
-    } elseif ($chat.Topic) { $chat.Topic } elseif ($participants) {
+    }
+    elseif ($chat.Topic) { $chat.Topic } elseif ($participants) {
         $participants -replace '[^a-zA-Z0-9 _-]', '_'
-    } else { "Chat_" + (Get-Date).ToString("yyyy-MM-dd") }
+    }
+    else { "Chat_" + (Get-Date).ToString("yyyy-MM-dd") }
 
     $safeName = $baseName -replace '[^a-zA-Z0-9 _-]', '_'
     $timestampSuffix = (Get-Date).ToString("yyyy-MM-dd.HH-mm")
@@ -77,7 +115,7 @@ foreach ($chat in $chats) {
         $index++
     }
 
-    $chatFolder = Join-Path $attachmentsRoot $safeName
+    $chatFolder = Join-Path $attachmentsFolder $safeName
     $attachmentsDownloaded = $false
 
     $messages = $null
@@ -86,11 +124,13 @@ foreach ($chat in $chats) {
         try {
             $messages = Get-MgChatMessage -ChatId $chatId -All -ErrorAction Stop
             $retry = $false
-        } catch {
+        }
+        catch {
             if ($_.Exception.Response.StatusCode -eq 403) {
                 Log "403 received. Retrying after $retryDelaySec seconds for chat $chatId..."
                 Start-Sleep -Seconds $retryDelaySec
-            } else {
+            }
+            else {
                 Log "Error retrieving messages for chat $chatId : $_" -Error
                 break
             }
@@ -139,7 +179,8 @@ foreach ($chat in $chats) {
             try {
                 try {
                     $hostedItems = Get-MgChatMessageHostedContent -ChatId $chatId -ChatMessageId $msg.Id -ErrorAction Stop
-                } catch {
+                }
+                catch {
                     if ($_.Exception.Response.StatusCode.Value__ -eq 404) {
                         Log "    Hosted content not found (404) for msg $($msg.Id)" -Error
                         continue
@@ -147,22 +188,28 @@ foreach ($chat in $chats) {
                     Log "    General failure retrieving hostedContent for msg $($msg.Id): $_" -Error
                     continue
                 }
-                
+            
                 foreach ($hc in $hostedItems) {
-                    if ($hc.ContentUrl) {
-                        $hcStream = Invoke-MgGraphRequest -Uri $hc.ContentUrl -Method GET
-                        $base64 = [System.Convert]::ToBase64String($hcStream.Content.ReadAsByteArrayAsync().Result)
-                        $hostedContentMap[$hc.Id] = "data:image/png;base64,$base64"
-                    } else {
-                        Log "    Skipped hostedContent with null ContentUrl for msg $($msg.Id), Id: $($hc.Id)" -Error
+                    if (-not $hc.ContentUrl) {
+                        Log "    Ignored hostedContent with null ContentUrl for msg $($msg.Id), Id: $($hc.Id)" -Error
+                        continue
                     }
-                    
-                    $base64 = [System.Convert]::ToBase64String($hcStream.Content.ReadAsByteArrayAsync().Result)
-                    $hostedContentMap[$hc.Id] = "data:image/png;base64,$base64"
+            
+                    try {
+                        $hcStream = Invoke-MgGraphRequest -Uri $hc.ContentUrl -Method GET
+                        $bytes = $hcStream.Content.ReadAsByteArrayAsync().Result
+                        $base64 = [System.Convert]::ToBase64String($bytes)
+                        $hostedContentMap[$hc.Id] = "data:image/png;base64,$base64"
+                    }
+                    catch {
+                        Log "    Failed to download hostedContent ID: $($hc.Id) for msg $($msg.Id): $_" -Error
+                    }
                 }
-            } catch {
+            }
+            catch {
                 Log "    Failed to get hostedContent for msg $($msg.Id): $_" -Error
             }
+            
 
             if ($hostedContentMap.Count -gt 0) {
                 $body = $body -replace 'src="cid:(.+?)"', { param($m)
@@ -184,8 +231,17 @@ foreach ($chat in $chats) {
         if ($msg.Attachments.Count -gt 0) {
             foreach ($att in $msg.Attachments) {
                 if ($att.ContentUrl) {
+                    Log "        Downloading attachment: $($att.Name) from ContentUrl: $($att.ContentUrl)"
+                    Log "Attachment dump: $($att | ConvertTo-Json -Depth 10 -Compress)"
+
                     try {
-                        $stream = Invoke-WebRequest -Uri $att.ContentUrl -Headers @{ Authorization = "Bearer $((Get-MgContext).AccessToken)" }
+                        if ($att.ContentUrl -match "sharepoint\.com.*\?e=") {
+                            # Pre-signed link — don't use Bearer header
+                            $stream = Invoke-WebRequest -Uri $att.ContentUrl
+                        } else {
+                            $stream = Invoke-WebRequest -Uri $att.ContentUrl -Headers @{ Authorization = "Bearer $((Get-MgContext).AccessToken)" }
+                        }
+                        
                         if (-not (Test-Path $chatFolder)) {
                             New-Item -ItemType Directory -Path $chatFolder -Force | Out-Null
                         }
@@ -195,11 +251,13 @@ foreach ($chat in $chats) {
                         $relativePath = "..\Attachments\$safeName\$fileName"
                         $attachmentsHtml += "<div class='attachment'>Attachment: <a href='$relativePath'>$fileName</a></div>"
                         $attachmentsDownloaded = $true
-                    } catch {
+                    }
+                    catch {
                         Log "        Failed to download ContentUrl: $($att.Name) - $_" -Error
                         $attachmentsHtml += "<div class='attachment'>Failed to download (ContentUrl): $($att.Name)</div>"
                     }
-                } elseif ($att.ContentBytes) {
+                }
+                elseif ($att.ContentBytes) {
                     $fileName = "$($msg.Id)_$($att.Name)" -replace '[^a-zA-Z0-9._-]', '_'
                     $filePath = Join-Path $chatFolder $fileName
                     try {
@@ -211,11 +269,13 @@ foreach ($chat in $chats) {
                         $relativePath = "..\Attachments\$safeName\$fileName"
                         $attachmentsHtml += "<div class='attachment'>Attachment: <a href='$relativePath'>$fileName</a></div>"
                         $attachmentsDownloaded = $true
-                    } catch {
+                    }
+                    catch {
                         Log "        Failed to write: $($att.Name) - $_" -Error
                         $attachmentsHtml += "<div class='attachment'>Failed to download attachment: $($att.Name)</div>"
                     }
-                } else {
+                }
+                else {
                     $type = $att.'@odata.type'
                     Log "        Attachment $($att.Name) has no base64 content. Type: $type" -Error
                     $attachmentsHtml += "<div class='attachment'>Not downloadable (cloud/reference): $($att.Name)</div>"
@@ -241,5 +301,16 @@ foreach ($chat in $chats) {
     #     Remove-Item -Recurse -Force -Path $chatFolder
     # }
 }
-
+Disconnect-MgGraph
+Remove-Variable -Name MgContext -Scope Global -ErrorAction SilentlyContinue
 Log "Export completed."
+
+##########################################################################
+# THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,       #
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     #
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.#
+# IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY  #
+# CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,  #
+# TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE     #
+# SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                #
+##########################################################################

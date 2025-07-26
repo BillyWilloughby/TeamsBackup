@@ -230,57 +230,65 @@ foreach ($chat in $chats) {
 
         if ($msg.Attachments.Count -gt 0) {
             foreach ($att in $msg.Attachments) {
+                $attName = if ($att.Name) { $att.Name } else { "[Unnamed]" }
+                $fileName = "$($msg.Id)_$attName" -replace '[^a-zA-Z0-9._-]', '_'
+                $filePath = Join-Path $chatFolder $fileName
+                $relativePath = "..\Attachments\$safeName\$fileName"
+            
+                if (-not (Test-Path $chatFolder)) {
+                    New-Item -ItemType Directory -Path $chatFolder -Force | Out-Null
+                }
+            
                 if ($att.ContentUrl) {
-                    Log "        Downloading attachment: $($att.Name) from ContentUrl: $($att.ContentUrl)"
-                    Log "Attachment dump: $($att | ConvertTo-Json -Depth 10 -Compress)"
-
+                    Log "    Downloading attachment: $attName from ContentUrl: $($att.ContentUrl)"
                     try {
-                        if ($att.ContentUrl -match "sharepoint\.com.*\?e=") {
-                            # Pre-signed link — don't use Bearer header
-                            $stream = Invoke-WebRequest -Uri $att.ContentUrl
-                        } else {
-                            $stream = Invoke-WebRequest -Uri $att.ContentUrl -Headers @{ Authorization = "Bearer $((Get-MgContext).AccessToken)" }
-                        }
-                        
-                        if (-not (Test-Path $chatFolder)) {
-                            New-Item -ItemType Directory -Path $chatFolder -Force | Out-Null
-                        }
-                        $fileName = "$($msg.Id)_$($att.Name)" -replace '[^a-zA-Z0-9._-]', '_'
-                        $filePath = Join-Path $chatFolder $fileName
-                        [System.IO.File]::WriteAllBytes($filePath, $stream.Content)
-                        $relativePath = "..\Attachments\$safeName\$fileName"
+                        # Attempt direct download (works only for public links)
+                        Invoke-WebRequest -Uri $att.ContentUrl -OutFile $filePath -ErrorAction Stop
                         $attachmentsHtml += "<div class='attachment'>Attachment: <a href='$relativePath'>$fileName</a></div>"
                         $attachmentsDownloaded = $true
                     }
                     catch {
-                        Log "        Failed to download ContentUrl: $($att.Name) - $_" -Error
-                        $attachmentsHtml += "<div class='attachment'>Failed to download (ContentUrl): $($att.Name)</div>"
+                        Log "        Direct ContentUrl failed. Attempting Graph fallback for $attName..."
+            
+                        # Build fallback Graph API URI using OneDrive path
+                        try {
+                            # Only works if file is in your personal OneDrive (based on observed path structure)
+                            $uri = $att.ContentUrl
+                            $path = $uri -replace '^https://[^/]+/[^/]+/([^?]+).*$', '/$1'
+                            $path = $path -replace '%20', ' '  # optional
+                            $path = [System.Web.HttpUtility]::UrlPathEncode($path)
+            
+                            $graphUri = "https://graph.microsoft.com/v1.0/me/drive/root:$path`:/content"
+                            $token = (Get-MgContext).AccessToken
+            
+                            Invoke-RestMethod -Uri $graphUri -Headers @{ Authorization = "Bearer $token" } -OutFile $filePath -ErrorAction Stop
+                            $attachmentsHtml += "<div class='attachment'>Attachment: <a href='$relativePath'>$fileName</a></div>"
+                            $attachmentsDownloaded = $true
+                        }
+                        catch {
+                            Log "        Failed Graph fallback download for $attName : $_" -Error
+                            $attachmentsHtml += "<div class='attachment'>Download failed: $attName</div>"
+                        }
                     }
                 }
                 elseif ($att.ContentBytes) {
-                    $fileName = "$($msg.Id)_$($att.Name)" -replace '[^a-zA-Z0-9._-]', '_'
-                    $filePath = Join-Path $chatFolder $fileName
                     try {
                         $bytes = [System.Convert]::FromBase64String($att.ContentBytes)
-                        if (-not (Test-Path $chatFolder)) {
-                            New-Item -ItemType Directory -Path $chatFolder -Force | Out-Null
-                        }
                         [System.IO.File]::WriteAllBytes($filePath, $bytes)
-                        $relativePath = "..\Attachments\$safeName\$fileName"
                         $attachmentsHtml += "<div class='attachment'>Attachment: <a href='$relativePath'>$fileName</a></div>"
                         $attachmentsDownloaded = $true
-                    }
-                    catch {
-                        Log "        Failed to write: $($att.Name) - $_" -Error
-                        $attachmentsHtml += "<div class='attachment'>Failed to download attachment: $($att.Name)</div>"
+                    } catch {
+                        Log "        Failed to write: $attName - $_" -Error
+                        $attachmentsHtml += "<div class='attachment'>Failed to download attachment: $attName</div>"
                     }
                 }
                 else {
-                    $type = $att.'@odata.type'
-                    Log "        Attachment $($att.Name) has no base64 content. Type: $type" -Error
-                    $attachmentsHtml += "<div class='attachment'>Not downloadable (cloud/reference): $($att.Name)</div>"
+                    $type = if ($att.'@odata.type') { $att.'@odata.type' } else { "[Unknown]" }
+                    Log "        Attachment $attName has no base64 content. Type: $type" -Error
+                    $attachmentsHtml += "<div class='attachment'>Not downloadable (cloud/reference): $attName</div>"
                 }
             }
+            
         }
 
         $html += @"

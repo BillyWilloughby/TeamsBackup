@@ -11,11 +11,13 @@
 $logTimestamp = (Get-Date).ToString("yyyy-MM-dd HH.mm.ss")
 $LogPath = ".\DownloadTeams_$logTimestamp.log"
 
+# Folders for export
 $exportFolder = ".\TeamsChatHTML"
 $attachmentsFolder = ".\TeamsAttachments"
-$retryDelaySec = 10
-$throttleDelayMs = 75
+$retryDelaySec = 10 # seconds to wait before retrying after 403
+$throttleDelayMs = 75 # milliseconds to wait between requests to avoid throttling
 
+# Create log function
 function Log {
     param([string]$msg, [switch]$ErrorMsg)
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
@@ -26,16 +28,16 @@ function Log {
 }
 
 Log "Authenticating with Microsoft Graph..."
-#Connect-MgGraph -Scopes "User.Read", "Chat.Read", "ChatMessage.Read", "Files.Read"
+# Connect to the Scopes needed for reading chats and files
 Connect-MgGraph -Scopes "User.Read", "Chat.Read", "Chat.ReadWrite", "Files.Read"
 if (-not (Get-MgContext)) {
     Log "Failed to authenticate with Microsoft Graph. Please check your credentials and permissions." -Error
     return
 }
+
+# Create export directories
 New-Item -ItemType Directory -Path $exportFolder -Force | Out-Null
 New-Item -ItemType Directory -Path $attachmentsFolder -Force | Out-Null
-
-
 
 # Get current user's ID using /me endpoint directly
 try {
@@ -82,7 +84,8 @@ Write-Host " $($ctx.TokenCredentialType)"
 
 Read-Host -Prompt "Press Enter to continue..."
 
-
+# Fetch all chats
+$chats = $null
 try {
     Log "Fetching all chats..."
     $chats = Get-MgChat -All -ErrorAction Stop
@@ -93,7 +96,7 @@ catch {
     return
 }
 
-
+# Process each chat and export messages
 foreach ($chat in $chats) {
     $chatId = $chat.Id
     $participants = ($chat.Members | ForEach-Object { $_.DisplayName }) -join ", "
@@ -117,7 +120,7 @@ foreach ($chat in $chats) {
 
     $chatFolder = Join-Path $attachmentsFolder $safeName
     $attachmentsDownloaded = $false
-
+    $messageFound = 0
     $messages = $null
     $retry = $true
     while ($retry) {
@@ -215,8 +218,10 @@ foreach ($chat in $chats) {
             if ($hostedContentMap.Count -gt 0) {
                 $body = $body -replace 'src="cid:(.+?)"', { param($m)
                     $cid = $m.Groups[1].Value
-                    if ($hostedContentMap.ContainsKey($cid)) { "src='0'" -f $hostedContentMap[$cid] } else { "src=''" }
+                    if ($hostedContentMap.ContainsKey($cid)) 
+                    { "src='0'" -f $hostedContentMap[$cid] } else { "src=''" }
                 }
+                $messageFound++
             }
         }
 
@@ -278,7 +283,8 @@ foreach ($chat in $chats) {
                         [System.IO.File]::WriteAllBytes($filePath, $bytes)
                         $attachmentsHtml += "<div class='attachment'>Attachment: <a href='$relativePath'>$fileName</a></div>"
                         $attachmentsDownloaded = $true
-                    } catch {
+                    }
+                    catch {
                         Log "        Failed to write: $attName - $_" -Error
                         $attachmentsHtml += "<div class='attachment'>Failed to download attachment: $attName</div>"
                     }
@@ -303,6 +309,10 @@ foreach ($chat in $chats) {
     }
 
     $html += "</body></html>"
+    if ($messageFound -eq 0) {
+        Log "No messages with content found for chat $chatId. Skipping export."
+        continue
+    }
     Set-Content -Path $chatFile -Value $html -Encoding UTF8
     Log "Exported chat to: $chatFile"
 

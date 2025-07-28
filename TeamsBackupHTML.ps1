@@ -156,6 +156,7 @@ foreach ($chat in $chats) {
 </head>
 <body>
 <h2>Chat Type: $($chat.ChatType)</h2>
+<p><strong>Chat ID:</strong> $chatId</p>
 <hr>
 "@
 
